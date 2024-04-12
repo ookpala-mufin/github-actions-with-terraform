@@ -1,0 +1,149 @@
+name: Terraform Workflow for aqpc
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - staging
+      - main 
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Select the environment'
+        required: true
+        type: choice
+        options:
+          - production-ap-southeast-2
+          - production-us-east-1
+          - production-ca-central-1
+          - staging-us-east
+          - dev
+      AWS_REGION:
+            description: 'Aws Region'
+            type: string
+            required: true
+      profile:
+          description: 'Specify the profile for all environment'
+          required: true
+          type: choice
+          options:
+            - production
+            - staging
+            - dev
+      terraform_action:
+          description: 'Manual trigger for Terraform actions'
+          required: true
+          type: choice
+          options:
+            - apply
+            - destroy
+
+        
+                
+jobs:
+  terraform-automation:
+    name: Terraform Automation
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install AWS CLI
+        run: |
+         sudo apt-get update
+         sudo apt-get install -y awscli
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.TERRAFORM_GITHUB_ACTION_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.TERRAFORM_GITHUB_ACTION_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.AWS_REGION || 'us-east-1' }}
+          role-to-assume: ${{ vars.CROSSACCOUNT_ADMIN}}
+          role-skip-session-tagging: true
+          role-session-name: TerraformAutomation
+
+      - name: Set AWS Credentials file
+        run: |
+          [[ ! -d "${HOME}/.aws" ]] && mkdir ${HOME}/.aws
+          echo "[profile ${{ vars.AWS_PROFILE }}]" >> ${HOME}/.aws/config && \
+          echo "aws_access_key_id=${{ env.TERRAFORM_GITHUB_ACTION_AWS_ACCESS_KEY_ID }}" >> ${HOME}/.aws/config && \
+          echo "aws_secret_access_key=${{ env.TERRAFORM_GITHUB_ACTION_AWS_SECRET_ACCESS_KEY }}" >> ${HOME}/.aws/config && \
+          echo "aws_session_token=${{ env.AWS_SESSION_TOKEN }}" >> ${HOME}/.aws/config
+  
+    # Set up Terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.4.6
+
+      - name: Determine Environment and Profile
+        id: set-vars
+        run: |
+          cd terraform/
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            if [ "${{ github.base_ref }}" == "develop" ]; then
+              echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+              echo "PROFILE=dev" >> $GITHUB_ENV
+            elif [ "${{ github.base_ref }}" == "staging" ]; then
+              echo "ENVIRONMENT=staging-us-east" >> $GITHUB_ENV
+              echo "PROFILE=staging" >> $GITHUB_ENV
+            elif [ "${{ github.base_ref }}" == "main" ]; then
+              echo "ENVIRONMENT=prod-ap-southeast-2" >> $GITHUB_ENV
+              echo "PROFILE=production" >> $GITHUB_ENV
+            fi
+          fi
+          echo "Environment: $ENVIRONMENT"
+          echo "Profile: $PROFILE"
+          terraform init --var-file=profiles/${ENVIRONMENT}/${PROFILE}.tfvars --backend-config=profiles/${ENVIRONMENT}/backend.conf -input=false
+        # shell: /usr/bin/bash -e {0} 
+
+        # run: |
+        #   cd terraform/
+        #   if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+        #     if [[ "${{ github.head_ref }}" == "develop" ]]; then
+        #       echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+        #       echo "PROFILE=dev" >> $GITHUB_ENV
+        #     elif [[ "${{ github.head_ref }}" == "staging" ]]; then
+        #       echo "ENVIRONMENT=staging-us-east" >> $GITHUB_ENV
+        #       echo "PROFILE=staging" >> $GITHUB_ENV
+        #     elif [[ "${{ github.head_ref }}" == "main" ]]; then
+        #       echo "ENVIRONMENT=prod-ap-southeast-2" >> $GITHUB_ENV
+        #       # Default profile for production(main branch)
+        #       echo "PROFILE=production" >> $GITHUB_ENV
+        #     fi
+        #   else
+        #     echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+        #     echo "PROFILE=${{ github.event.inputs.profile }}" >> $GITHUB_ENV
+        #   fi
+        #   echo $GITHUB_ENV
+        #   terraform init --var-file=profiles/${{ env.ENVIRONMENT }}/${{ env.PROFILE }}.tfvars --backend-config=profiles/${{ env.ENVIRONMENT }}/backend.conf -input=false
+
+
+      # Initialize Terraform
+      # - name: Terraform Init
+      #   run: |
+      #     cd terraform/
+      #     terraform init --var-file=profiles/${{ inputs.environment }}/${{ inputs.profile }}.tfvars --backend-config=profiles/${{ inputs.environment }}/backend.conf -input=false
+      - name: Terraform Init
+        run: |
+          cd terraform/
+          terraform init --var-file=profiles/${{ env.ENVIRONMENT }}/${{ env.PROFILE }}.tfvars --backend-config=profiles/${{ env.ENVIRONMENT }}/backend.conf -input=false
+      
+      # Create a Terraform plan
+      - name: Terraform Plan
+        run: |
+          cd terraform/
+          terraform plan --var-file=profiles/${{ env.ENVIRONMENT }}/${{ env.PROFILE }}.tfvars -input=false
+      # Apply or destroy based on the workflow input
+      - name: Terraform Apply
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.terraform_action == 'apply'
+        run: |
+          cd terraform/
+          terraform apply --var-file=profiles/${{ env.ENVIRONMENT }}/${{ env.PROFILE }}.tfvars -input=false -auto-approve
+      - name: Terraform Destroy
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.terraform_action == 'destroy'
+        run: |
+          cd terraform/
+          terraform destroy --var-file=profiles/${{ env.ENVIRONMENT }}/${{ env.PROFILE }}.tfvars -input=false -auto-approve
