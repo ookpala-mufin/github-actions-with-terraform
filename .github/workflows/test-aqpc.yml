@@ -1,7 +1,8 @@
 name: Terraform Workflow for aqpc
 
 on:
-  pull_request:
+  #pull_request:
+  push:
     branches:
       - develop
       - staging
